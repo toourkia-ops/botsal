@@ -39,27 +39,68 @@ class AmazonBot:
             try:
                 r = await client.get(url)
                 if r.status_code != 200:
-                    print(f"⚠️ HATA DETAYI: Amazon {r.status_code} hatası. Bot engellenmiş olabilir.")
+                    logger.warning(f"⚠️ HATA DETAYI: Amazon {r.status_code} hatası.")
                     return None
 
                 soup = BeautifulSoup(r.text, "html.parser")
-                title = soup.find("span", {"id": "productTitle"})
-                title = title.get_text(strip=True) if title else "Harika Bir Ürün"
                 
+                # Title
+                title_tag = soup.find("span", {"id": "productTitle"})
+                title = title_tag.get_text(strip=True) if title_tag else "Harika Bir Ürün"
+                
+                # Current Price
                 price_tag = soup.find("span", {"class": "a-price-whole"})
-                price = price_tag.get_text(strip=True) if price_tag else "Fiyat Bilgisi Yok"
+                price_str = price_tag.get_text(strip=True).replace(".", "").replace(",", "") if price_tag else "0"
+                current_price = float(price_str) if price_str.isdigit() else 0
+                
+                # List Price (Eski Fiyat)
+                list_price_tag = soup.find("span", {"class": "a-price a-text-price"})
+                list_price_str = "0"
+                if list_price_tag:
+                    list_price_val = list_price_tag.find("span", {"class": "a-offscreen"})
+                    if list_price_val:
+                        list_price_str = list_price_val.get_text(strip=True).replace("₺", "").replace(".", "").replace(",", "").strip()
+                
+                list_price = float(list_price_str) if list_price_str.isdigit() else 0
+                
+                # Seller (Satıcı)
+                merchant_info = soup.find("div", {"id": "merchant-info"})
+                seller_text = merchant_info.get_text(strip=True) if merchant_info else ""
+                is_amazon_seller = "Amazon.com.tr" in seller_text
+                
+                # Discount Calculation
+                discount_rate = 0
+                if list_price > current_price and list_price > 0:
+                    discount_rate = ((list_price - current_price) / list_price) * 100
                 
                 img_tag = soup.find("img", {"id": "landingImage"})
                 img_url = img_tag.get("src") if img_tag else None
                 
-                return {"title": title, "price": price, "img_url": img_url, "link": self.clean_amazon_url(url)}
+                return {
+                    "title": title, 
+                    "price": current_price, 
+                    "list_price": list_price,
+                    "discount_rate": discount_rate,
+                    "is_amazon_seller": is_amazon_seller,
+                    "img_url": img_url, 
+                    "link": self.clean_amazon_url(url)
+                }
             except Exception as e:
-                print(f"❌ SCRAPE HATASI: {e}")
+                logger.error(f"❌ SCRAPE HATASI: {e}")
                 return None
 
     async def post_to_all_channels(self, bot, data):
         """Tüm kanallara sırayla mesaj gönderir."""
-        caption = f"🔥 **{data['title'][:100]}...**\n\n💰 **Fiyat:** {data['price']} TL\n\n👇 **Satın Al:**"
+        # Dip Fiyat Alarmı
+        alarm = "🚨 **DİP FİYAT ALARMI** 🚨\n\n" if data['discount_rate'] >= 30 else ""
+        
+        caption = (
+            f"{alarm}"
+            f"🔥 **{data['title'][:100]}...**\n\n"
+            f"💰 **Fiyat:** {data['price']:,.2f} TL\n"
+            f"📉 **İndirim Oranı:** %{int(data['discount_rate'])}\n\n"
+            f"👇 **Satın Al:**"
+        )
         keyboard = [[InlineKeyboardButton("📦 Sitede Gör", url=data['link'])]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -73,27 +114,49 @@ class AmazonBot:
                     reply_markup=reply_markup
                 )
                 logger.info(f"✅ Ürün {kanal_id} kanalında paylaşıldı.")
-                await asyncio.sleep(2) # Kanallar arası kısa bekleme (Telegram banlamasın)
+                await asyncio.sleep(2)
             except Exception as e:
                 logger.error(f"❌ {kanal_id} kanalına gönderilemedi: {e}")
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /ara command to generate Amazon affiliate search links."""
-    if not update.message or not context.args:
-        await update.message.reply_text("🔎 Lütfen aramak istediğin ürünü yaz: `/ara oyuncu faresi`", parse_mode=ParseMode.MARKDOWN)
+    """Handles the /ara command to generate Amazon affiliate search links with a premium look."""
+    if not update.message:
         return
 
+    # Komutun yanında kelime yoksa uyarı ver
+    if not context.args:
+        await update.message.reply_text(
+            "🔍 **Arama Asistanı Devrede!**\n\n"
+            "Aradığın ürünü bulmak için komutu şu şekilde kullan:\n"
+            "`/ara oyuncu klavyesi`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # Kelime grubunu al ve temizle
     query = " ".join(context.args)
-    # Boşlukları + yapalım ve diğer karakterleri encode edelim
+    # Boşlukları + yapalım
     cleaned_query = urllib.parse.quote_plus(query)
     
-    # Link oluşturma
-    search_url = AMAZON_SEARCH_URL.format(query=cleaned_query, tag=STORE_ID)
+    # Affiliate Link Şablonu
+    search_url = f"https://www.amazon.com.tr/s?k={cleaned_query}&tag={STORE_ID}"
     
-    # Yanıt
-    response_text = f"🔍 İşte aradığın ürün için en iyi fırsatlar!\n\n👉 [Buraya Tıklayarak İncele]({search_url})"
+    # Premium Mesaj Tasarımı
+    response_text = (
+        f"💎 **Amazon Arama Asistanı**\n\n"
+        f"✨ **Aranan Ürün:** `{query}`\n"
+        f"🚀 Senin için en uygun sonuçları hazırladım!"
+    )
     
-    await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
+    # Şık bir buton ekleyelim
+    keyboard = [[InlineKeyboardButton("🛍️ Ürünleri Gör ve İncele", url=search_url)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        response_text,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def auto_loop(bot_engine, application):
     print("✅ Otomatik tarama devrede. 4 kanal için takip başladı.")
@@ -113,10 +176,14 @@ async def auto_loop(bot_engine, application):
                         if clean_url not in bot_engine.shared_urls:
                             data = await bot_engine.scrape_product(clean_url)
                             if data and data['img_url']:
-                                await bot_engine.post_to_all_channels(application.bot, data)
-                                bot_engine.shared_urls.add(clean_url)
-                                count += 1
-                                await asyncio.sleep(10) # Amazon spam koruması
+                                # AŞAMA 2: FİLTRELER
+                                if data['discount_rate'] >= 15 and data['is_amazon_seller']:
+                                    await bot_engine.post_to_all_channels(application.bot, data)
+                                    bot_engine.shared_urls.add(clean_url)
+                                    count += 1
+                                    await asyncio.sleep(10) # Amazon spam koruması
+                                else:
+                                    logger.info(f"⏭️ Ürün filtrelendi: %{int(data['discount_rate'])} indirim, Satıcı Amazon mu: {data['is_amazon_seller']}")
                         if count >= 3: break
                 else:
                     print(f"⚠️ HATA DETAYI: Kod {r.status_code}")
@@ -136,8 +203,17 @@ async def main():
             await update.message.reply_text("⏳ Tüm kanallar için işlem başlatıldı...")
             data = await bot_engine.scrape_product(url_match.group(1))
             if data:
+                # Manuel mesajda da filtreleri uygulayalım mı? Kullanıcı "Amazon'dan çekilen fırsatlar" dediği için 
+                # manuel girişte kullanıcıyı bilgilendirmek daha şık olur.
+                if data['discount_rate'] < 15:
+                    await update.message.reply_text(f"⚠️ Bu ürünün indirim oranı %{int(data['discount_rate'])}. Minimum %15 gerekli.")
+                    return
+                if not data['is_amazon_seller']:
+                    await update.message.reply_text("⚠️ Bu ürün Amazon.com.tr tarafından satılmıyor, güvenlik gereği paylaşılmadı.")
+                    return
+
                 await bot_engine.post_to_all_channels(app.bot, data)
-                await update.message.reply_text("✅ Tüm kanallarda paylaşıldı!")
+                await update.message.reply_text("✅ Filtrelerden geçti ve tüm kanallarda paylaşıldı!")
             else:
                 await update.message.reply_text("❌ Ürün bilgisi çekilemedi. Terminali kontrol et.")
 
