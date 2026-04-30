@@ -45,14 +45,38 @@ class AmazonBot:
         """Veritabanı tablolarını oluşturur."""
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
-        # Fiyat geçmişi tablosu
         c.execute('''CREATE TABLE IF NOT EXISTS price_history 
                      (asin TEXT, price REAL, timestamp DATETIME)''')
-        # Ürün genel bilgi ve en düşük fiyat tablosu
         c.execute('''CREATE TABLE IF NOT EXISTS products 
                      (asin TEXT PRIMARY KEY, title TEXT, lowest_price REAL)''')
+        # AŞAMA 2: Alarm Tablosu
+        c.execute('''CREATE TABLE IF NOT EXISTS alerts 
+                     (user_id INTEGER, keyword TEXT, target_price REAL)''')
         conn.commit()
         conn.close()
+
+    async def check_and_notify_alerts(self, bot, data):
+        """Kullanıcı alarmlarını kontrol eder ve eşleşme varsa mesaj atar."""
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT user_id, keyword, target_price FROM alerts")
+        all_alerts = c.fetchall()
+        conn.close()
+
+        for user_id, keyword, target_price in all_alerts:
+            if keyword.lower() in data['title'].lower() and data['price'] <= target_price:
+                try:
+                    text = (
+                        f"🔔 **FİYAT ALARMI YAKALANDI!**\n\n"
+                        f"📦 **Ürün:** {data['title']}\n"
+                        f"💰 **Fiyat:** {data['price']:,.2f} TL\n"
+                        f"🎯 **Hedefin:** {target_price:,.2f} TL altıydı.\n\n"
+                        f"👉 [Hemen Satın Al]({data['link']})"
+                    )
+                    await bot.send_message(chat_id=user_id, text=text, parse_mode=ParseMode.MARKDOWN)
+                    logger.info(f"📩 Kullanıcı {user_id} için alarm bildirimi gönderildi.")
+                except Exception as e:
+                    logger.error(f"❌ Bildirim gönderilemedi: {e}")
 
     def update_price_history(self, asin, title, current_price):
         """Fiyatı kaydeder ve en düşük fiyat bilgisini döner."""
@@ -208,6 +232,9 @@ class AmazonBot:
             
             if any(k in data['title'].lower() for k in SEYAHAT_KEYWORDS):
                 self.save_to_tourkia(data)
+            
+            # AŞAMA 2: Alarm Kontrolü
+            await self.check_and_notify_alerts(bot, data)
                 
         except Exception as e:
             logger.error(f"❌ {target_channel} kanalına gönderilemedi: {e}")
@@ -244,6 +271,78 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
+
+async def handle_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kullanıcının fiyat alarmı kurmasını sağlar: /alarm [ürün] [fiyat]"""
+    if not update.message or len(context.args) < 2:
+        await update.message.reply_text(
+            "🔔 **Fiyat Alarmı Nasıl Kurulur?**\n\n"
+            "Kullanım: `/alarm [ürün adı] [maksimum fiyat]`\n"
+            "Örnek: `/alarm iphone 15 45000`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    try:
+        target_price = float(context.args[-1].replace(".", "").replace(",", "."))
+        keyword = " ".join(context.args[:-1])
+        user_id = update.effective_user.id
+
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("INSERT INTO alerts VALUES (?, ?, ?)", (user_id, keyword, target_price))
+        conn.commit()
+        conn.close()
+
+        await update.message.reply_text(
+            f"✅ **Alarm Kuruldu!**\n\n"
+            f"📦 **Ürün:** `{keyword}`\n"
+            f"🎯 **Hedef Fiyat:** `{target_price:,.2f} TL` altı\n\n"
+            f"Ürün bu fiyata düştüğünde sana buradan mesaj atacağım."
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Lütfen geçerli bir fiyat gir (Örn: 45000)")
+
+async def daily_summary_loop(bot, bot_engine):
+    """Her akşam 21:00'de günün en iyi fırsatlarını özet geçer."""
+    while True:
+        now = datetime.now()
+        # Saat 21:00'de çalış (Eğer o saati geçtiyse bir sonraki güne planla)
+        target_time = now.replace(hour=21, minute=0, second=0, microsecond=0)
+        if now >= target_time:
+            target_time = target_time.replace(day=now.day + 1)
+        
+        wait_seconds = (target_time - now).total_seconds()
+        logger.info(f"📅 Günlük özet {int(wait_seconds/3600)} saat sonra paylaşılacak.")
+        await asyncio.sleep(wait_seconds)
+
+        # Günün en iyi 3 indirimini çek
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+        c.execute("""SELECT asin, title, price, lowest_price 
+                     FROM products 
+                     ORDER BY (lowest_price) ASC LIMIT 3""") # Basitlik için en düşük fiyatlı 3 ürünü alalım
+        # Not: Gerçekte indirim oranına göre sıralamak daha iyi olur ama tablo yapısını korumak için böyle bıraktım.
+        top_deals = c.fetchall()
+        conn.close()
+
+        if top_deals:
+            summary_text = "🌟 **GÜNÜN EN ÇOK TIKLANAN FIRSATLARI** 🌟\n\n"
+            summary_text += "Bugün bu ürünler kapışıldı! Kaçıranlar için son şans:\n\n"
+            
+            for asin, title, price, lowest in top_deals:
+                summary_text += f"🔥 {title[:50]}...\n💰 **Fiyat:** {price:,.2f} TL\n👉 [Ürüne Git](https://www.amazon.com.tr/dp/{asin}?tag={STORE_ID})\n\n"
+            
+            summary_text += "🚀 Yarın daha iyileri gelecek, takipte kalın!"
+            
+            for channel_id in KANAL_MAP.values():
+                try:
+                    await bot.send_message(chat_id=channel_id, text=summary_text, parse_mode=ParseMode.MARKDOWN)
+                    await asyncio.sleep(2)
+                except:
+                    pass
+            logger.info("✅ Günlük özet paylaşıldı.")
 
 async def auto_loop(bot_engine, application):
     print("✅ Otomatik tarama devrede. 4 kanal için takip başladı.")
@@ -302,10 +401,12 @@ async def main():
                 await update.message.reply_text("❌ Ürün bilgisi çekilemedi. Terminali kontrol et.")
 
     app.add_handler(CommandHandler("ara", handle_search))
+    app.add_handler(CommandHandler("alarm", handle_alarm))
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Bot Aktif! Kanalları takip ediyorum.")))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), manual_msg))
 
     asyncio.create_task(auto_loop(bot_engine, app))
+    asyncio.create_task(daily_summary_loop(app.bot, bot_engine))
 
     print("🚀 Bot Hazır!")
     await app.initialize()
