@@ -17,9 +17,16 @@ KANAL_MAP = {
     "ev_yasam": "@Ev_Yasam_Kanal_ID",     # Örn: @Amazon_Ev_Yasam
     "genel": "@Amazon_indirim_tr"          # Hiçbir kategoriye uymazsa buraya gider
 }
+# AŞAMA 4: Seyahat Anahtar Kelimeleri
+SEYAHAT_KEYWORDS = ["valiz", "powerbank", "termos", "boyun yastığı", "adaptör", "sırt çantası", "şarj", "kulaklık", "pasaport"]
+TOURKIA_DB = "tourkia_deals.json"
+
 STORE_ID = "amazonind0133-21"
 AMAZON_SEARCH_URL = "https://www.amazon.com.tr/s?k={query}&tag={tag}"
 # =================================================================
+
+import json
+import os
 
 logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,6 +44,23 @@ class AmazonBot:
         if pid:
             return f"https://www.amazon.com.tr/dp/{pid.group(1)}?tag={STORE_ID}"
         return url
+
+    def save_to_tourkia(self, data):
+        """Ürünü Tourkia JSON veri tabanına kaydeder."""
+        deals = []
+        if os.path.exists(TOURKIA_DB):
+            try:
+                with open(TOURKIA_DB, "r", encoding="utf-8") as f:
+                    deals = json.load(f)
+            except:
+                deals = []
+        
+        # Mükerrer kaydı önle
+        if not any(d['link'] == data['link'] for d in deals):
+            deals.append(data)
+            with open(TOURKIA_DB, "w", encoding="utf-8") as f:
+                json.dump(deals, f, ensure_ascii=False, indent=4)
+            logger.info(f"✨ TOURKIA: Ürün seyahat veritabanına eklendi: {data['title'][:30]}")
 
     async def scrape_product(self, url):
         async with httpx.AsyncClient(headers=self.headers, follow_redirects=True, timeout=25) as client:
@@ -132,6 +156,11 @@ class AmazonBot:
                 reply_markup=reply_markup
             )
             logger.info(f"✅ Ürün {target_channel} kanalında paylaşıldı. (Kategori: {data['category']})")
+            
+            # AŞAMA 4: Seyahat Kontrolü
+            if any(k in data['title'].lower() for k in SEYAHAT_KEYWORDS):
+                self.save_to_tourkia(data)
+                
         except Exception as e:
             logger.error(f"❌ {target_channel} kanalına gönderilemedi: {e}")
 
@@ -258,3 +287,4 @@ if __name__ == "__main__":
         print("Bot durduruldu.")
     except Exception as e:
         print(f"BAĞLANTI KOPTU! Kritik Hata: {e}")
+
