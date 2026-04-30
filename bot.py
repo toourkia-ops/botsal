@@ -11,8 +11,12 @@ from telegram.constants import ParseMode
 
 # ================= CONFIG (BURALARI DOLDUR KANKA) =================
 TOKEN = "8769910441:AAHb0Y_jFaHBPWYKK-PT_QCh47RPLCyA3jw"
-# 4 Kanalın ID'sini bu listeye ekle
-KANAL_ID_LISTESI = ["@Amazon_indirim_tr"]
+# Kategorilere göre kanal eşleşmeleri
+KANAL_MAP = {
+    "elektronik": "@Elektronik_Kanal_ID", # Örn: @Amazon_Elektronik
+    "ev_yasam": "@Ev_Yasam_Kanal_ID",     # Örn: @Amazon_Ev_Yasam
+    "genel": "@Amazon_indirim_tr"          # Hiçbir kategoriye uymazsa buraya gider
+}
 STORE_ID = "amazonind0133-21"
 AMAZON_SEARCH_URL = "https://www.amazon.com.tr/s?k={query}&tag={tag}"
 # =================================================================
@@ -68,6 +72,16 @@ class AmazonBot:
                 seller_text = merchant_info.get_text(strip=True) if merchant_info else ""
                 is_amazon_seller = "Amazon.com.tr" in seller_text
                 
+                # Category (Kategori) Tespiti
+                category = "genel"
+                breadcrumb = soup.find("div", {"id": "wayfinding-breadcrumbs_container"})
+                if breadcrumb:
+                    b_text = breadcrumb.get_text(strip=True).lower()
+                    if any(x in b_text for x in ["elektronik", "bilgisayar", "teknoloji", "telefon"]):
+                        category = "elektronik"
+                    elif any(x in b_text for x in ["ev", "yaşam", "mutfak", "mobilya"]):
+                        category = "ev_yasam"
+                
                 # Discount Calculation
                 discount_rate = 0
                 if list_price > current_price and list_price > 0:
@@ -82,6 +96,7 @@ class AmazonBot:
                     "list_price": list_price,
                     "discount_rate": discount_rate,
                     "is_amazon_seller": is_amazon_seller,
+                    "category": category,
                     "img_url": img_url, 
                     "link": self.clean_amazon_url(url)
                 }
@@ -90,7 +105,7 @@ class AmazonBot:
                 return None
 
     async def post_to_all_channels(self, bot, data):
-        """Tüm kanallara sırayla mesaj gönderir."""
+        """Kategoriye göre doğru kanala mesaj gönderir."""
         # Dip Fiyat Alarmı
         alarm = "🚨 **DİP FİYAT ALARMI** 🚨\n\n" if data['discount_rate'] >= 30 else ""
         
@@ -98,25 +113,27 @@ class AmazonBot:
             f"{alarm}"
             f"🔥 **{data['title'][:100]}...**\n\n"
             f"💰 **Fiyat:** {data['price']:,.2f} TL\n"
-            f"📉 **İndirim Oranı:** %{int(data['discount_rate'])}\n\n"
+            f"📉 **İndirim Oranı:** %{int(data['discount_rate'])}\n"
+            f"🏷️ **Kategori:** {data['category'].replace('_', ' ').title()}\n\n"
             f"👇 **Satın Al:**"
         )
         keyboard = [[InlineKeyboardButton("📦 Sitede Gör", url=data['link'])]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        for kanal_id in KANAL_ID_LISTESI:
-            try:
-                await bot.send_photo(
-                    chat_id=kanal_id,
-                    photo=data['img_url'],
-                    caption=caption,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=reply_markup
-                )
-                logger.info(f"✅ Ürün {kanal_id} kanalında paylaşıldı.")
-                await asyncio.sleep(2)
-            except Exception as e:
-                logger.error(f"❌ {kanal_id} kanalına gönderilemedi: {e}")
+        # Kategoriye göre kanal seçimi
+        target_channel = KANAL_MAP.get(data['category'], KANAL_MAP['genel'])
+
+        try:
+            await bot.send_photo(
+                chat_id=target_channel,
+                photo=data['img_url'],
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup
+            )
+            logger.info(f"✅ Ürün {target_channel} kanalında paylaşıldı. (Kategori: {data['category']})")
+        except Exception as e:
+            logger.error(f"❌ {target_channel} kanalına gönderilemedi: {e}")
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /ara command to generate Amazon affiliate search links with a premium look."""
