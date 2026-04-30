@@ -11,15 +11,14 @@ from telegram.constants import ParseMode
 
 # ================= CONFIG (BURALARI DOLDUR KANKA) =================
 TOKEN = "8769910441:AAHb0Y_jFaHBPWYKK-PT_QCh47RPLCyA3jw"
-# Kategorilere göre kanal eşleşmeleri
 KANAL_MAP = {
-    "elektronik": "@Elektronik_Kanal_ID", # Örn: @Amazon_Elektronik
-    "ev_yasam": "@Ev_Yasam_Kanal_ID",     # Örn: @Amazon_Ev_Yasam
-    "genel": "@Amazon_indirim_tr"          # Hiçbir kategoriye uymazsa buraya gider
+    "elektronik": "@Elektronik_Kanal_ID",
+    "ev_yasam": "@Ev_Yasam_Kanal_ID",
+    "genel": "@Amazon_indirim_tr"
 }
-# AŞAMA 4: Seyahat Anahtar Kelimeleri
 SEYAHAT_KEYWORDS = ["valiz", "powerbank", "termos", "boyun yastığı", "adaptör", "sırt çantası", "şarj", "kulaklık", "pasaport"]
 TOURKIA_DB = "tourkia_deals.json"
+DB_NAME = "bot_data.db"
 
 STORE_ID = "amazonind0133-21"
 AMAZON_SEARCH_URL = "https://www.amazon.com.tr/s?k={query}&tag={tag}"
@@ -27,6 +26,8 @@ AMAZON_SEARCH_URL = "https://www.amazon.com.tr/s?k={query}&tag={tag}"
 
 import json
 import os
+import sqlite3
+from datetime import datetime
 
 logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,15 +39,57 @@ class AmazonBot:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
             "Accept-Language": "tr-TR,tr;q=0.9",
         }
+        self.init_db()
+
+    def init_db(self):
+        """Veritabanı tablolarını oluşturur."""
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        # Fiyat geçmişi tablosu
+        c.execute('''CREATE TABLE IF NOT EXISTS price_history 
+                     (asin TEXT, price REAL, timestamp DATETIME)''')
+        # Ürün genel bilgi ve en düşük fiyat tablosu
+        c.execute('''CREATE TABLE IF NOT EXISTS products 
+                     (asin TEXT PRIMARY KEY, title TEXT, lowest_price REAL)''')
+        conn.commit()
+        conn.close()
+
+    def update_price_history(self, asin, title, current_price):
+        """Fiyatı kaydeder ve en düşük fiyat bilgisini döner."""
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        
+        # Geçmişe ekle
+        c.execute("INSERT INTO price_history VALUES (?, ?, ?)", (asin, current_price, datetime.now()))
+        
+        # Mevcut en düşük fiyatı kontrol et
+        c.execute("SELECT lowest_price FROM products WHERE asin = ?", (asin,))
+        row = c.fetchone()
+        
+        is_lowest = False
+        if row:
+            old_lowest = row[0]
+            if current_price < old_lowest:
+                c.execute("UPDATE products SET lowest_price = ?, title = ? WHERE asin = ?", (current_price, title, asin))
+                is_lowest = True
+            elif current_price == old_lowest:
+                is_lowest = True
+        else:
+            c.execute("INSERT INTO products VALUES (?, ?, ?)", (asin, title, current_price))
+            is_lowest = True
+            old_lowest = current_price
+            
+        conn.commit()
+        conn.close()
+        return is_lowest, (row[0] if row else current_price)
 
     def clean_amazon_url(self, url):
         pid = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url)
         if pid:
-            return f"https://www.amazon.com.tr/dp/{pid.group(1)}?tag={STORE_ID}"
-        return url
+            return f"https://www.amazon.com.tr/dp/{pid.group(1)}?tag={STORE_ID}", pid.group(1)
+        return url, None
 
     def save_to_tourkia(self, data):
-        """Ürünü Tourkia JSON veri tabanına kaydeder."""
         deals = []
         if os.path.exists(TOURKIA_DB):
             try:
@@ -55,7 +98,6 @@ class AmazonBot:
             except:
                 deals = []
         
-        # Mükerrer kaydı önle
         if not any(d['link'] == data['link'] for d in deals):
             deals.append(data)
             with open(TOURKIA_DB, "w", encoding="utf-8") as f:
@@ -63,25 +105,23 @@ class AmazonBot:
             logger.info(f"✨ TOURKIA: Ürün seyahat veritabanına eklendi: {data['title'][:30]}")
 
     async def scrape_product(self, url):
+        clean_url, asin = self.clean_amazon_url(url)
         async with httpx.AsyncClient(headers=self.headers, follow_redirects=True, timeout=25) as client:
             try:
-                r = await client.get(url)
+                r = await client.get(clean_url)
                 if r.status_code != 200:
                     logger.warning(f"⚠️ HATA DETAYI: Amazon {r.status_code} hatası.")
                     return None
 
                 soup = BeautifulSoup(r.text, "html.parser")
                 
-                # Title
                 title_tag = soup.find("span", {"id": "productTitle"})
                 title = title_tag.get_text(strip=True) if title_tag else "Harika Bir Ürün"
                 
-                # Current Price
                 price_tag = soup.find("span", {"class": "a-price-whole"})
                 price_str = price_tag.get_text(strip=True).replace(".", "").replace(",", "") if price_tag else "0"
                 current_price = float(price_str) if price_str.isdigit() else 0
                 
-                # List Price (Eski Fiyat)
                 list_price_tag = soup.find("span", {"class": "a-price a-text-price"})
                 list_price_str = "0"
                 if list_price_tag:
@@ -91,12 +131,10 @@ class AmazonBot:
                 
                 list_price = float(list_price_str) if list_price_str.isdigit() else 0
                 
-                # Seller (Satıcı)
                 merchant_info = soup.find("div", {"id": "merchant-info"})
                 seller_text = merchant_info.get_text(strip=True) if merchant_info else ""
                 is_amazon_seller = "Amazon.com.tr" in seller_text
                 
-                # Category (Kategori) Tespiti
                 category = "genel"
                 breadcrumb = soup.find("div", {"id": "wayfinding-breadcrumbs_container"})
                 if breadcrumb:
@@ -106,7 +144,6 @@ class AmazonBot:
                     elif any(x in b_text for x in ["ev", "yaşam", "mutfak", "mobilya"]):
                         category = "ev_yasam"
                 
-                # Discount Calculation
                 discount_rate = 0
                 if list_price > current_price and list_price > 0:
                     discount_rate = ((list_price - current_price) / list_price) * 100
@@ -114,7 +151,11 @@ class AmazonBot:
                 img_tag = soup.find("img", {"id": "landingImage"})
                 img_url = img_tag.get("src") if img_tag else None
                 
+                # AŞAMA 5 İÇİN HAZIRLIK: Fiyat geçmişini güncelle
+                is_lowest, last_lowest = self.update_price_history(asin, title, current_price)
+                
                 return {
+                    "asin": asin,
                     "title": title, 
                     "price": current_price, 
                     "list_price": list_price,
@@ -122,7 +163,9 @@ class AmazonBot:
                     "is_amazon_seller": is_amazon_seller,
                     "category": category,
                     "img_url": img_url, 
-                    "link": self.clean_amazon_url(url)
+                    "link": clean_url,
+                    "is_lowest": is_lowest,
+                    "last_lowest": last_lowest
                 }
             except Exception as e:
                 logger.error(f"❌ SCRAPE HATASI: {e}")
@@ -130,21 +173,27 @@ class AmazonBot:
 
     async def post_to_all_channels(self, bot, data):
         """Kategoriye göre doğru kanala mesaj gönderir."""
-        # Dip Fiyat Alarmı
         alarm = "🚨 **DİP FİYAT ALARMI** 🚨\n\n" if data['discount_rate'] >= 30 else ""
         
+        # Fiyat Geçmişi Notu
+        history_note = ""
+        if data['is_lowest']:
+            history_note = "\n💎 **Bu Ürün İçin Tespit Edilen En Düşük Fiyat!**"
+        else:
+            history_note = f"\n📉 *Daha önceki en düşük fiyat: {data['last_lowest']:,.2f} TL*"
+
         caption = (
             f"{alarm}"
             f"🔥 **{data['title'][:100]}...**\n\n"
             f"💰 **Fiyat:** {data['price']:,.2f} TL\n"
             f"📉 **İndirim Oranı:** %{int(data['discount_rate'])}\n"
-            f"🏷️ **Kategori:** {data['category'].replace('_', ' ').title()}\n\n"
+            f"🏷️ **Kategori:** {data['category'].replace('_', ' ').title()}"
+            f"{history_note}\n\n"
             f"👇 **Satın Al:**"
         )
         keyboard = [[InlineKeyboardButton("📦 Sitede Gör", url=data['link'])]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Kategoriye göre kanal seçimi
         target_channel = KANAL_MAP.get(data['category'], KANAL_MAP['genel'])
 
         try:
@@ -157,7 +206,6 @@ class AmazonBot:
             )
             logger.info(f"✅ Ürün {target_channel} kanalında paylaşıldı. (Kategori: {data['category']})")
             
-            # AŞAMA 4: Seyahat Kontrolü
             if any(k in data['title'].lower() for k in SEYAHAT_KEYWORDS):
                 self.save_to_tourkia(data)
                 
@@ -169,7 +217,6 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
-    # Komutun yanında kelime yoksa uyarı ver
     if not context.args:
         await update.message.reply_text(
             "🔍 **Arama Asistanı Devrede!**\n\n"
@@ -179,22 +226,16 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Kelime grubunu al ve temizle
     query = " ".join(context.args)
-    # Boşlukları + yapalım
     cleaned_query = urllib.parse.quote_plus(query)
-    
-    # Affiliate Link Şablonu
     search_url = f"https://www.amazon.com.tr/s?k={cleaned_query}&tag={STORE_ID}"
     
-    # Premium Mesaj Tasarımı
     response_text = (
         f"💎 **Amazon Arama Asistanı**\n\n"
         f"✨ **Aranan Ürün:** `{query}`\n"
         f"🚀 Senin için en uygun sonuçları hazırladım!"
     )
     
-    # Şık bir buton ekleyelim
     keyboard = [[InlineKeyboardButton("🛍️ Ürünleri Gör ve İncele", url=search_url)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -217,17 +258,16 @@ async def auto_loop(bot_engine, application):
                     count = 0
                     for link in links:
                         full_url = "https://www.amazon.com.tr" + link['href'] if link['href'].startswith('/') else link['href']
-                        clean_url = bot_engine.clean_amazon_url(full_url)
+                        clean_url, asin = bot_engine.clean_amazon_url(full_url)
                         
                         if clean_url not in bot_engine.shared_urls:
                             data = await bot_engine.scrape_product(clean_url)
                             if data and data['img_url']:
-                                # AŞAMA 2: FİLTRELER
                                 if data['discount_rate'] >= 15 and data['is_amazon_seller']:
                                     await bot_engine.post_to_all_channels(application.bot, data)
                                     bot_engine.shared_urls.add(clean_url)
                                     count += 1
-                                    await asyncio.sleep(10) # Amazon spam koruması
+                                    await asyncio.sleep(10)
                                 else:
                                     logger.info(f"⏭️ Ürün filtrelendi: %{int(data['discount_rate'])} indirim, Satıcı Amazon mu: {data['is_amazon_seller']}")
                         if count >= 3: break
@@ -236,7 +276,7 @@ async def auto_loop(bot_engine, application):
         except Exception as e:
             print(f"🚨 DÖNGÜ HATASI: {e}")
         
-        await asyncio.sleep(1800) # 30 dk bekle
+        await asyncio.sleep(1800)
 
 async def main():
     bot_engine = AmazonBot()
@@ -249,8 +289,6 @@ async def main():
             await update.message.reply_text("⏳ Tüm kanallar için işlem başlatıldı...")
             data = await bot_engine.scrape_product(url_match.group(1))
             if data:
-                # Manuel mesajda da filtreleri uygulayalım mı? Kullanıcı "Amazon'dan çekilen fırsatlar" dediği için 
-                # manuel girişte kullanıcıyı bilgilendirmek daha şık olur.
                 if data['discount_rate'] < 15:
                     await update.message.reply_text(f"⚠️ Bu ürünün indirim oranı %{int(data['discount_rate'])}. Minimum %15 gerekli.")
                     return
@@ -263,12 +301,10 @@ async def main():
             else:
                 await update.message.reply_text("❌ Ürün bilgisi çekilemedi. Terminali kontrol et.")
 
-    # Handlers
     app.add_handler(CommandHandler("ara", handle_search))
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Bot Aktif! Kanalları takip ediyorum.")))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), manual_msg))
 
-    # Start auto loop
     asyncio.create_task(auto_loop(bot_engine, app))
 
     print("🚀 Bot Hazır!")
@@ -276,7 +312,6 @@ async def main():
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     
-    # Keep running
     while True:
         await asyncio.sleep(3600)
 
@@ -287,4 +322,5 @@ if __name__ == "__main__":
         print("Bot durduruldu.")
     except Exception as e:
         print(f"BAĞLANTI KOPTU! Kritik Hata: {e}")
+
 
