@@ -24,6 +24,10 @@ STORE_ID = "amazonind0133-21"
 AMAZON_SEARCH_URL = "https://www.amazon.com.tr/s?k={query}&tag={tag}"
 # =================================================================
 
+# Hız Sınırı Deposu (User ID: [Timestamp1, Timestamp2, ...])
+USER_SEARCH_LIMITS = {}
+
+
 import json
 import os
 import sqlite3
@@ -244,8 +248,22 @@ class AmazonBot:
             logger.error(f"❌ {target_channel} kanalına gönderilemedi: {e}")
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /ara command to generate Amazon affiliate search links with a premium look."""
-    if not update.message:
+    """Handles the /ara command with rate limiting."""
+    if not update.message or not update.effective_user:
+        return
+
+    user_id = update.effective_user.id
+    now = datetime.now().timestamp()
+
+    # Rate Limit Kontrolü (1 dakikada max 3 arama)
+    if user_id not in USER_SEARCH_LIMITS:
+        USER_SEARCH_LIMITS[user_id] = []
+    
+    # 60 saniyeden eski kayıtları temizle
+    USER_SEARCH_LIMITS[user_id] = [t for t in USER_SEARCH_LIMITS[user_id] if now - t < 60]
+
+    if len(USER_SEARCH_LIMITS[user_id]) >= 3:
+        await update.message.reply_text("🛑 **Hız Sınırı!**\n\nSistem güvenliği için lütfen 1 dakika bekleyin.", parse_mode=ParseMode.MARKDOWN)
         return
 
     if not context.args:
@@ -256,6 +274,9 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN
         )
         return
+
+    # Sınırı geçmediyse zamanı kaydet ve devam et
+    USER_SEARCH_LIMITS[user_id].append(now)
 
     query = " ".join(context.args)
     cleaned_query = urllib.parse.quote_plus(query)
