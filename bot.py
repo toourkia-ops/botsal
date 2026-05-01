@@ -218,12 +218,41 @@ class AmazonBot:
                 
                 category = self.detect_category(title)
                 is_30_day_low, last_lowest = self.update_price_history(asin, title, current_price)
-                
+
+                # --- YENİ: KITLIK VE YENİLİK RADARI ---
+                stock_alert = False
+                stock_text = ""
+                availability_tag = soup.find("div", {"id": "availability"})
+                if availability_tag:
+                    avail_text = availability_tag.get_text(strip=True)
+                    if "adet kaldı" in avail_text:
+                        stock_alert = True
+                        stock_text = avail_text.split(".")[0] # "Stokta sadece 1 adet kaldı" gibi kısmı al
+
+                is_new_arrival = False
+                # Ürün detaylarından tarihi çekmeye çalışalım
+                details_text = soup.get_text()
+                date_match = re.search(r"(?:İlk Listelenme Tarihi|satışa sunulduğu tarih)\s*:\s*([\d]+\s+[a-zA-ZçğıöşüÇĞİÖŞÜ]+\s+[\d]{4})", details_text)
+                if date_match:
+                    try:
+                        date_str = date_match.group(1).lower()
+                        months = ["ocak", "şubat", "mart", "nisan", "mayıs", "haziran", "temmuz", "ağustos", "eylül", "ekim", "kasım", "aralık"]
+                        day, month_name, year = date_str.split()
+                        month = months.index(month_name) + 1
+                        first_date = datetime(int(year), month, int(day))
+                        if (datetime.now() - first_date).days <= 14:
+                            is_new_arrival = True
+                    except:
+                        pass
+                # --------------------------------------
+
                 return {
                     "asin": asin, "title": title, "price": current_price, "list_price": list_price,
                     "discount_rate": discount_rate, "is_amazon_seller": is_amazon_seller,
                     "category": category, "img_url": img_url, "link": clean_url,
-                    "is_lowest": is_30_day_low, "last_lowest": last_lowest
+                    "is_lowest": is_30_day_low, "last_lowest": last_lowest,
+                    "stock_alert": stock_alert, "stock_text": stock_text,
+                    "is_new_arrival": is_new_arrival
                 }
             except Exception as e:
                 logger.error(f"❌ Amazon Scrape Hatası: {e}")
@@ -307,7 +336,15 @@ class AmazonBot:
 
     async def post_to_all_channels(self, bot, data):
         """Kategoriye göre doğru kanala mesaj gönderir."""
-        alarm = "🚨 <b>DİP FİYAT ALARMI</b> 🚨\n\n" if data['discount_rate'] >= 30 else ""
+        # --- PREMIUM TETİKLEYİCİLER ---
+        premium_header = ""
+        if data.get('stock_alert'):
+            premium_header = f"🚨 <b>{data['stock_text'].upper()}! Biten kapar!</b>\n\n"
+        elif data.get('is_new_arrival'):
+            premium_header = "🚀 <b>TÜRKİYE'YE YENİ GELDİ! İlk keşfeden sen ol!</b>\n\n"
+        
+        alarm = "🚨 <b>DİP FİYAT ALARMI</b> 🚨\n\n" if data['discount_rate'] >= 30 and not premium_header else ""
+        # ------------------------------
         
         # Fiyat Geçmişi Notu (FOMO Algoritması)
         history_note = ""
@@ -321,7 +358,7 @@ class AmazonBot:
         old_price_text = f"<s>{data['list_price']:,.2f} TL</s> " if data['list_price'] > data['price'] else ""
 
         caption = (
-            f"{alarm}"
+            f"{premium_header}{alarm}"
             f"🔥 <b>{safe_title}...</b>\n\n"
             f"💰 <b>Fiyat:</b> {old_price_text}<b>{data['price']:,.2f} TL</b>\n"
             f"📉 <b>İndirim Oranı:</b> %{int(data['discount_rate'])}\n"
@@ -515,13 +552,14 @@ async def auto_loop(bot_engine, application):
                         if clean_url not in bot_engine.shared_urls:
                             data = await bot_engine.scrape_product(clean_url)
                             if data and data['img_url']:
-                                if data['discount_rate'] >= 5:
+                                # İndirim %5+ ise VEYA Stok Alarmı VEYA Yeni Ürün ise paylaş
+                                if data['discount_rate'] >= 5 or data.get('stock_alert') or data.get('is_new_arrival'):
                                     await bot_engine.post_to_all_channels(application.bot, data)
                                     bot_engine.shared_urls.add(clean_url)
                                     count += 1
                                     await asyncio.sleep(10)
                                 else:
-                                    logger.info(f"🚫 Ürün reddedildi: İndirim sadece %{int(data['discount_rate'])}")
+                                    logger.info(f"🚫 Ürün reddedildi: Kriterlere uymuyor.")
                         if count >= 3: break
                 else:
                     print(f"⚠️ HATA DETAYI: Kod {r.status_code}")
@@ -541,8 +579,8 @@ async def main():
             await update.message.reply_text("⏳ Tüm kanallar için işlem başlatıldı...")
             data = await bot_engine.scrape_product(url_match.group(1))
             if data:
-                if data['discount_rate'] < 5:
-                    await update.message.reply_text(f"⚠️ Bu ürünün indirim oranı %{int(data['discount_rate'])}. Minimum %5 gerekli.")
+                if data['discount_rate'] < 5 and not data.get('stock_alert') and not data.get('is_new_arrival'):
+                    await update.message.reply_text(f"⚠️ Bu ürünün indirim oranı %{int(data['discount_rate'])} ve özel bir durumu (stok/yeni) yok. Paylaşılmadı.")
                     return
 
                 await bot_engine.post_to_all_channels(app.bot, data)
