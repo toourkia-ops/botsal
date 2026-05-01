@@ -535,14 +535,29 @@ async def daily_summary_loop(bot, bot_engine):
             logger.info("✅ Günlük özet paylaşıldı.")
 
 async def auto_loop(bot_engine, application):
-    print("✅ Otomatik tarama devrede. 4 kanal için takip başladı.")
+    print("✅ Otomatik tarama devrede. Genişletilmiş tarama (Tüm Konseptler) başladı.")
+    
+    # Tarama yapılacak ana "Discovery" sayfaları
+    DISCOVERY_URLS = [
+        "https://www.amazon.com.tr/gp/goldbox",           # Günün Fırsatları
+        "https://www.amazon.com.tr/gp/bestsellers",       # En Çok Satanlar
+        "https://www.amazon.com.tr/gp/new-releases",      # Yeni Çıkanlar
+        "https://www.amazon.com.tr/gp/movers-and-shakers", # Fiyatı Düşenler & Trendler
+        "https://www.amazon.com.tr/gp/most-wished-for",   # En Çok İstenenler
+    ]
+    
+    current_url_index = 0
+    
     while True:
         try:
-            logger.info("🔍 Amazon Fırsatları taranıyor...")
+            target_url = DISCOVERY_URLS[current_url_index]
+            logger.info(f"🔍 Amazon Taraması Başlıyor: {target_url}")
+            
             async with httpx.AsyncClient(headers=bot_engine.headers, timeout=25) as client:
-                r = await client.get("https://www.amazon.com.tr/gp/goldbox")
+                r = await client.get(target_url)
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.text, "html.parser")
+                    # Daha geniş kapsamlı bir link yakalama (dp ve gp/product içerenler)
                     links = soup.find_all("a", href=re.compile(r"/(?:dp|gp/product)/[A-Z0-9]{10}"))
                     count = 0
                     for link in links:
@@ -563,6 +578,10 @@ async def auto_loop(bot_engine, application):
                         if count >= 3: break
                 else:
                     print(f"⚠️ HATA DETAYI: Kod {r.status_code}")
+            
+            # Bir sonraki URL'ye geç
+            current_url_index = (current_url_index + 1) % len(DISCOVERY_URLS)
+            
         except Exception as e:
             print(f"🚨 DÖNGÜ HATASI: {e}")
         
