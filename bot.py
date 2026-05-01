@@ -362,13 +362,13 @@ async def auto_loop(bot_engine, application):
                         if clean_url not in bot_engine.shared_urls:
                             data = await bot_engine.scrape_product(clean_url)
                             if data and data['img_url']:
-                                if data['discount_rate'] >= 15 and data['is_amazon_seller']:
+                                if data['discount_rate'] >= 5:
                                     await bot_engine.post_to_all_channels(application.bot, data)
                                     bot_engine.shared_urls.add(clean_url)
                                     count += 1
                                     await asyncio.sleep(10)
                                 else:
-                                    logger.info(f"⏭️ Ürün filtrelendi: %{int(data['discount_rate'])} indirim, Satıcı Amazon mu: {data['is_amazon_seller']}")
+                                    logger.info(f"🚫 Ürün reddedildi: İndirim sadece %{int(data['discount_rate'])}")
                         if count >= 3: break
                 else:
                     print(f"⚠️ HATA DETAYI: Kod {r.status_code}")
@@ -388,11 +388,8 @@ async def main():
             await update.message.reply_text("⏳ Tüm kanallar için işlem başlatıldı...")
             data = await bot_engine.scrape_product(url_match.group(1))
             if data:
-                if data['discount_rate'] < 15:
-                    await update.message.reply_text(f"⚠️ Bu ürünün indirim oranı %{int(data['discount_rate'])}. Minimum %15 gerekli.")
-                    return
-                if not data['is_amazon_seller']:
-                    await update.message.reply_text("⚠️ Bu ürün Amazon.com.tr tarafından satılmıyor, güvenlik gereği paylaşılmadı.")
+                if data['discount_rate'] < 5:
+                    await update.message.reply_text(f"⚠️ Bu ürünün indirim oranı %{int(data['discount_rate'])}. Minimum %5 gerekli.")
                     return
 
                 await bot_engine.post_to_all_channels(app.bot, data)
