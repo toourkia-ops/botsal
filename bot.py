@@ -560,13 +560,10 @@ async def daily_summary_loop(bot, bot_engine):
 async def auto_loop(bot_engine, application):
     print("✅ Otomatik tarama devrede. Genişletilmiş tarama (Tüm Konseptler) başladı.")
     
-    # Tarama yapılacak ana "Discovery" sayfaları
+    # Tarama yapılacak ana "Deals" sayfaları
     DISCOVERY_URLS = [
-        "https://www.amazon.com.tr/gp/goldbox",           # Günün Fırsatları
-        "https://www.amazon.com.tr/gp/bestsellers",       # En Çok Satanlar
-        "https://www.amazon.com.tr/gp/new-releases",      # Yeni Çıkanlar
-        "https://www.amazon.com.tr/gp/movers-and-shakers", # Fiyatı Düşenler & Trendler
-        "https://www.amazon.com.tr/gp/most-wished-for",   # En Çok İstenenler
+        "https://www.amazon.com.tr/deals",                # Günün Fırsatları
+        "https://www.amazon.com.tr/gp/goldbox",           # Altın Kutusu Fırsatları
     ]
     
     current_url_index = 0
@@ -576,33 +573,65 @@ async def auto_loop(bot_engine, application):
             target_url = DISCOVERY_URLS[current_url_index]
             logger.info(f"🔍 Amazon Taraması Başlıyor: {target_url}")
             
-            async with httpx.AsyncClient(headers=bot_engine.headers, timeout=25) as client:
+            async with httpx.AsyncClient(headers=bot_engine.headers, timeout=25, follow_redirects=True) as client:
                 r = await client.get(target_url)
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.text, "html.parser")
-                    # Daha geniş kapsamlı bir link yakalama (dp ve gp/product içerenler)
-                    links = soup.find_all("a", href=re.compile(r"/(?:dp|gp/product)/[A-Z0-9]{10}"))
+                    
+                    # Amazon Fırsat Sayfası Kart Seçicileri (DealCard veya ProductCard)
+                    # Amazon sürekli class isimlerini değiştirdiği için daha esnek bir yaklaşım kullanıyoruz
+                    cards = soup.find_all("div", attrs={"class": re.compile(r"DealCard|ProductCard-module__card")})
+                    
+                    if not cards:
+                        # Eğer kartlar bulunamazsa eski yönteme (link bazlı) dön ama sadece bu sayfadaki ürünleri al
+                        cards = soup.find_all("a", href=re.compile(r"/(?:dp|gp/product)/[A-Z0-9]{10}"))
+                        logger.info(f"ℹ️ Kart yapısı bulunamadı, {len(cards)} adet link üzerinden devam ediliyor.")
+
                     count = 0
-                    for link in links:
-                        full_url = "https://www.amazon.com.tr" + link['href'] if link['href'].startswith('/') else link['href']
-                        clean_url, asin = bot_engine.clean_amazon_url(full_url)
-                        
-                        if clean_url not in bot_engine.shared_urls:
+                    for card in cards:
+                        try:
+                            # Link bulma
+                            link_tag = card.find("a", href=True) if hasattr(card, 'find') else card
+                            if not link_tag or not link_tag.get('href'): continue
+                            
+                            full_url = "https://www.amazon.com.tr" + link_tag['href'] if link_tag['href'].startswith('/') else link_tag['href']
+                            clean_url, asin = bot_engine.clean_amazon_url(full_url)
+                            
+                            if not asin or clean_url in bot_engine.shared_urls:
+                                continue
+
+                            # HIZLI TARAMA: Eğer kartın içinden indirim oranı çekilebiliyorsa ürüne gitmeden süzgeçten geçir
+                            # Amazon fırsat sayfalarında genelde "%20", "20% indirim" gibi badge'ler bulunur
+                            badge = card.find(attrs={"class": re.compile(r"badge|Badge|label|Label")})
+                            if badge:
+                                badge_text = badge.get_text()
+                                # % işaretini ve rakamları bul
+                                discount_match = re.search(r"%(\d+)|(\d+)%", badge_text)
+                                if discount_match:
+                                    found_rate = int(discount_match.group(1) or discount_match.group(2))
+                                    if found_rate < 15:
+                                        logger.info(f"⏭️ Atlama: İndirim %{found_rate} (Eşik %15) - {clean_url}")
+                                        continue
+                            
+                            # Ürün sayfasına git ve detayları çek
                             data = await bot_engine.scrape_product(clean_url)
+                            
                             if data and data['img_url']:
-                                # --- GÜNCEL FİLTRE KURALLARI (%15 Barajı ve İstisnalar) ---
-                                rule1 = data['discount_rate'] >= 15
-                                rule2 = data.get('stock_count', 999) <= 1 and data['discount_rate'] >= 5
-                                rule3 = data.get('is_new_arrival') and data['discount_rate'] >= 5
-                                
-                                if rule1 or rule2 or rule3:
+                                # --- GÜNCEL FİLTRE KURALLARI (%15 Barajı) ---
+                                # Fırsat sayfalarında olduğumuz için odak noktamız %15 indirim
+                                if data['discount_rate'] >= 15:
                                     await bot_engine.post_to_all_channels(application.bot, data)
                                     bot_engine.shared_urls.add(clean_url)
                                     count += 1
+                                    logger.info(f"🚀 FIRSAT PAYLAŞILDI: {data['title'][:40]} (%{int(data['discount_rate'])})")
                                     await asyncio.sleep(10)
                                 else:
-                                    logger.info(f"🚫 Ürün reddedildi: Kriterlere uymuyor. (%{data['discount_rate']:.1f} indirim)")
-                        if count >= 3: break
+                                    logger.info(f"🚫 Kriter dışı: %{data['discount_rate']:.1f} indirim. ({data['title'][:30]})")
+                        except Exception as card_err:
+                            logger.error(f"⚠️ Kart işleme hatası: {card_err}")
+                            continue
+                        
+                        if count >= 5: break # Her döngüde max 5 ürün (Spamı önlemek için)
                 else:
                     print(f"⚠️ HATA DETAYI: Kod {r.status_code}")
             
