@@ -79,33 +79,37 @@ class AmazonBot:
                     logger.error(f"❌ Bildirim gönderilemedi: {e}")
 
     def update_price_history(self, asin, title, current_price):
-        """Fiyatı kaydeder ve en düşük fiyat bilgisini döner."""
+        """Fiyatı kaydeder ve son 30 günün en düşük fiyatı olup olmadığını döner."""
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         
+        now = datetime.now()
         # Geçmişe ekle
-        c.execute("INSERT INTO price_history VALUES (?, ?, ?)", (asin, current_price, datetime.now()))
+        c.execute("INSERT INTO price_history VALUES (?, ?, ?)", (asin, current_price, now))
         
-        # Mevcut en düşük fiyatı kontrol et
+        # Son 30 günün en düşük fiyatını bul (mevcut kayıt dahil en düşüğü bulur)
+        c.execute("""SELECT MIN(price) FROM price_history 
+                     WHERE asin = ? AND timestamp >= datetime('now', '-30 days')""", (asin,))
+        min_last_30 = c.fetchone()[0]
+        
+        is_30_day_low = False
+        if min_last_30 is not None and current_price <= min_last_30:
+            is_30_day_low = True
+            
+        # Global en düşük fiyatı da takip etmeye devam edelim
         c.execute("SELECT lowest_price FROM products WHERE asin = ?", (asin,))
         row = c.fetchone()
-        
-        is_lowest = False
+        last_lowest = row[0] if row else current_price
+
         if row:
-            old_lowest = row[0]
-            if current_price < old_lowest:
+            if current_price < row[0]:
                 c.execute("UPDATE products SET lowest_price = ?, title = ? WHERE asin = ?", (current_price, title, asin))
-                is_lowest = True
-            elif current_price == old_lowest:
-                is_lowest = True
         else:
             c.execute("INSERT INTO products VALUES (?, ?, ?)", (asin, title, current_price))
-            is_lowest = True
-            old_lowest = current_price
             
         conn.commit()
         conn.close()
-        return is_lowest, (row[0] if row else current_price)
+        return is_30_day_low, last_lowest
 
     def clean_amazon_url(self, url):
         pid = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url)
@@ -175,8 +179,8 @@ class AmazonBot:
                 img_tag = soup.find("img", {"id": "landingImage"})
                 img_url = img_tag.get("src") if img_tag else None
                 
-                # AŞAMA 5 İÇİN HAZIRLIK: Fiyat geçmişini güncelle
-                is_lowest, last_lowest = self.update_price_history(asin, title, current_price)
+                # Fiyat geçmişini güncelle ve 30 günlük dip kontrolü yap
+                is_30_day_low, last_lowest = self.update_price_history(asin, title, current_price)
                 
                 return {
                     "asin": asin,
@@ -188,7 +192,7 @@ class AmazonBot:
                     "category": category,
                     "img_url": img_url, 
                     "link": clean_url,
-                    "is_lowest": is_lowest,
+                    "is_lowest": is_30_day_low,
                     "last_lowest": last_lowest
                 }
             except Exception as e:
@@ -199,10 +203,10 @@ class AmazonBot:
         """Kategoriye göre doğru kanala mesaj gönderir."""
         alarm = "🚨 **DİP FİYAT ALARMI** 🚨\n\n" if data['discount_rate'] >= 30 else ""
         
-        # Fiyat Geçmişi Notu
+        # Fiyat Geçmişi Notu (FOMO Algoritması)
         history_note = ""
         if data['is_lowest']:
-            history_note = "\n💎 **Bu Ürün İçin Tespit Edilen En Düşük Fiyat!**"
+            history_note = "\n🔥 **İstatistiklerimize göre bu ürün son 1 ayın en düşük fiyatında, yarın artma olasılığı çok yüksek!**"
         else:
             history_note = f"\n📉 *Daha önceki en düşük fiyat: {data['last_lowest']:,.2f} TL*"
 
