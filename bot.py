@@ -4,6 +4,7 @@ import sys
 import httpx
 import re
 import urllib.parse
+import html
 from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
@@ -205,25 +206,28 @@ class AmazonBot:
 
     async def post_to_all_channels(self, bot, data):
         """Kategoriye göre doğru kanala mesaj gönderir."""
-        alarm = "🚨 **DİP FİYAT ALARMI** 🚨\n\n" if data['discount_rate'] >= 30 else ""
+        alarm = "🚨 <b>DİP FİYAT ALARMI</b> 🚨\n\n" if data['discount_rate'] >= 30 else ""
         
         # Fiyat Geçmişi Notu (FOMO Algoritması)
         history_note = ""
         if data['is_lowest']:
-            history_note = "\n🔥 **İstatistiklerimize göre bu ürün son 1 ayın en düşük fiyatında, yarın artma olasılığı çok yüksek!**"
+            history_note = "\n🔥 <b>İstatistiklerimize göre bu ürün son 1 ayın en düşük fiyatında, yarın artma olasılığı çok yüksek!</b>"
         else:
-            history_note = f"\n📉 *Daha önceki en düşük fiyat: {data['last_lowest']:,.2f} TL*"
+            history_note = f"\n📉 <i>Daha önceki en düşük fiyat: {data['last_lowest']:,.2f} TL</i>"
+
+        # HTML güvenliği için başlığı temizle
+        safe_title = html.escape(data['title'][:100])
+        old_price_text = f"<s>{data['list_price']:,.2f} TL</s> " if data['list_price'] > data['price'] else ""
 
         caption = (
             f"{alarm}"
-            f"🔥 **{data['title'][:100]}...**\n\n"
-            f"💰 **Fiyat:** {data['price']:,.2f} TL\n"
-            f"📉 **İndirim Oranı:** %{int(data['discount_rate'])}\n"
-            f"🏷️ **Kategori:** {data['category'].replace('_', ' ').title()}"
-            f"{history_note}\n\n"
-            f"👇 **Satın Al:**"
+            f"🔥 <b>{safe_title}...</b>\n\n"
+            f"💰 <b>Fiyat:</b> {old_price_text}<b>{data['price']:,.2f} TL</b>\n"
+            f"📉 <b>İndirim Oranı:</b> %{int(data['discount_rate'])}\n"
+            f"🏷️ <b>Kategori:</b> {data['category'].replace('_', ' ').title()}"
+            f"{history_note}"
         )
-        keyboard = [[InlineKeyboardButton("📦 Sitede Gör", url=data['link'])]]
+        keyboard = [[InlineKeyboardButton("🛒 İndirimli Fiyattan Satın Al", url=data['link'])]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         target_channel = KANAL_MAP.get(data['category'], KANAL_MAP['genel'])
@@ -233,7 +237,7 @@ class AmazonBot:
                 chat_id=target_channel,
                 photo=data['img_url'],
                 caption=caption,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup
             )
             logger.info(f"✅ Ürün {target_channel} kanalında paylaşıldı. (Kategori: {data['category']})")
