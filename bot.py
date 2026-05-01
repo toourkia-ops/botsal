@@ -375,7 +375,7 @@ async def auto_loop(bot_engine, application):
         except Exception as e:
             print(f"🚨 DÖNGÜ HATASI: {e}")
         
-        await asyncio.sleep(1800)
+        await asyncio.sleep(300)
 
 async def main():
     bot_engine = AmazonBot()
