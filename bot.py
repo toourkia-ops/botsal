@@ -5,6 +5,15 @@ import httpx
 import re
 import urllib.parse
 import html
+
+# Windows terminal emoji desteği için encoding ayarı
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        # Eski python sürümleri için
+        pass
+
 from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
@@ -222,12 +231,16 @@ class AmazonBot:
                 # --- YENİ: KITLIK VE YENİLİK RADARI ---
                 stock_alert = False
                 stock_text = ""
+                stock_count = 999 # Varsayılan yüksek stok
                 availability_tag = soup.find("div", {"id": "availability"})
                 if availability_tag:
                     avail_text = availability_tag.get_text(strip=True)
                     if "adet kaldı" in avail_text:
                         stock_alert = True
-                        stock_text = avail_text.split(".")[0] # "Stokta sadece 1 adet kaldı" gibi kısmı al
+                        stock_text = avail_text.split(".")[0]
+                        count_match = re.search(r"(\d+)", avail_text)
+                        if count_match:
+                            stock_count = int(count_match.group(1))
 
                 is_new_arrival = False
                 # Ürün detaylarından tarihi çekmeye çalışalım
@@ -255,6 +268,7 @@ class AmazonBot:
                     "category": category, "img_url": img_url, "link": clean_url,
                     "is_lowest": is_30_day_low, "last_lowest": last_lowest,
                     "stock_alert": stock_alert, "stock_text": stock_text,
+                    "stock_count": stock_count,
                     "is_new_arrival": is_new_arrival
                 }
             except Exception as e:
@@ -576,15 +590,18 @@ async def auto_loop(bot_engine, application):
                         if clean_url not in bot_engine.shared_urls:
                             data = await bot_engine.scrape_product(clean_url)
                             if data and data['img_url']:
-                                # --- DEBUG MODU: FİLTRE GEVŞETME ---
-                                # %0 indirim bile olsa VEYA Stok Alarmı VEYA Yeni Ürün ise paylaş (OR mantığı)
-                                if data['discount_rate'] >= 0 or data.get('stock_alert') or data.get('is_new_arrival'):
+                                # --- GÜNCEL FİLTRE KURALLARI (%15 Barajı ve İstisnalar) ---
+                                rule1 = data['discount_rate'] >= 15
+                                rule2 = data.get('stock_count', 999) <= 1 and data['discount_rate'] >= 5
+                                rule3 = data.get('is_new_arrival') and data['discount_rate'] >= 5
+                                
+                                if rule1 or rule2 or rule3:
                                     await bot_engine.post_to_all_channels(application.bot, data)
                                     bot_engine.shared_urls.add(clean_url)
                                     count += 1
                                     await asyncio.sleep(10)
                                 else:
-                                    logger.info(f"🚫 Ürün reddedildi: Kriterlere uymuyor.")
+                                    logger.info(f"🚫 Ürün reddedildi: Kriterlere uymuyor. (%{data['discount_rate']:.1f} indirim)")
                         if count >= 3: break
                 else:
                     print(f"⚠️ HATA DETAYI: Kod {r.status_code}")
@@ -608,9 +625,13 @@ async def main():
             await update.message.reply_text("⏳ Tüm kanallar için işlem başlatıldı...")
             data = await bot_engine.scrape_product(url_match.group(1))
             if data:
-                # --- DEBUG MODU: FİLTRE GEVŞETME ---
-                if data['discount_rate'] < 0 and not data.get('stock_alert') and not data.get('is_new_arrival'):
-                    await update.message.reply_text(f"⚠️ Bu ürünün indirim oranı %{int(data['discount_rate'])} ve özel bir durumu (stok/yeni) yok. Paylaşılmadı.")
+                # --- GÜNCEL FİLTRE KURALLARI ---
+                rule1 = data['discount_rate'] >= 15
+                rule2 = data.get('stock_count', 999) <= 1 and data['discount_rate'] >= 5
+                rule3 = data.get('is_new_arrival') and data['discount_rate'] >= 5
+
+                if not (rule1 or rule2 or rule3):
+                    await update.message.reply_text(f"⚠️ Bu ürün kriterleri sağlamıyor.\n(İndirim: %{int(data['discount_rate'])}, Stok: {data.get('stock_count', 'Bilinmiyor')}, Yeni: {data.get('is_new_arrival')})")
                     return
 
                 await bot_engine.post_to_all_channels(app.bot, data)
