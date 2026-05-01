@@ -22,7 +22,12 @@ TOURKIA_DB = "tourkia_deals.json"
 DB_NAME = "bot_data.db"
 
 STORE_ID = "amazonind0133-21"
+TRENDYOL_PARTNER_ID = "PARTNER_ID_TRENDYOL"
+HEPSIBURADA_PARTNER_ID = "PARTNER_ID_HB"
+
 AMAZON_SEARCH_URL = "https://www.amazon.com.tr/s?k={query}&tag={tag}"
+TRENDYOL_SEARCH_URL = "https://www.trendyol.com/sr?q={query}&utm_source=aff_t&utm_medium=cps&utm_campaign={partner_id}"
+HB_SEARCH_URL = "https://www.hepsiburada.com/ara?q={query}&utm_source=affiliate&utm_medium=go-partner&utm_campaign={partner_id}"
 # =================================================================
 
 # Hız Sınırı Deposu (User ID: [Timestamp1, Timestamp2, ...])
@@ -40,11 +45,22 @@ logger = logging.getLogger(__name__)
 class AmazonBot:
     def __init__(self):
         self.shared_urls = set()
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "Accept-Language": "tr-TR,tr;q=0.9",
-        }
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1"
+        ]
         self.init_db()
+
+    def get_headers(self):
+        import random
+        return {
+            "User-Agent": random.choice(self.user_agents),
+            "Accept-Language": "tr-TR,tr;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Referer": "https://www.google.com/"
+        }
 
     def init_db(self):
         """Veritabanı tablolarını oluşturur."""
@@ -138,70 +154,126 @@ class AmazonBot:
             logger.info(f"✨ TOURKIA: Ürün seyahat veritabanına eklendi: {data['title'][:30]}")
 
     async def scrape_product(self, url):
+        """URL'ye göre doğru platformu seçer."""
+        if "amazon.com.tr" in url:
+            return await self.scrape_amazon(url)
+        elif "trendyol.com" in url:
+            return await self.scrape_trendyol(url)
+        elif "hepsiburada.com" in url:
+            return await self.scrape_hepsiburada(url)
+        return None
+
+    async def scrape_amazon(self, url):
         clean_url, asin = self.clean_amazon_url(url)
-        async with httpx.AsyncClient(headers=self.headers, follow_redirects=True, timeout=25) as client:
+        async with httpx.AsyncClient(headers=self.get_headers(), follow_redirects=True, timeout=25) as client:
             try:
                 r = await client.get(clean_url)
                 if r.status_code != 200:
-                    logger.warning(f"⚠️ HATA DETAYI: Amazon {r.status_code} hatası.")
+                    logger.warning(f"⚠️ HATA: Amazon {r.status_code} döndürdü.")
                     return None
 
                 soup = BeautifulSoup(r.text, "html.parser")
-                
-                title_tag = soup.find("span", {"id": "productTitle"})
-                title = title_tag.get_text(strip=True) if title_tag else "Harika Bir Ürün"
+                title = soup.find("span", {"id": "productTitle"}).get_text(strip=True) if soup.find("span", {"id": "productTitle"}) else "Amazon Ürünü"
                 
                 price_tag = soup.find("span", {"class": "a-price-whole"})
                 price_str = price_tag.get_text(strip=True).replace(".", "").replace(",", "") if price_tag else "0"
                 current_price = float(price_str) if price_str.isdigit() else 0
                 
+                list_price = 0
                 list_price_tag = soup.find("span", {"class": "a-price a-text-price"})
-                list_price_str = "0"
                 if list_price_tag:
-                    list_price_val = list_price_tag.find("span", {"class": "a-offscreen"})
-                    if list_price_val:
-                        list_price_str = list_price_val.get_text(strip=True).replace("₺", "").replace(".", "").replace(",", "").strip()
-                
-                list_price = float(list_price_str) if list_price_str.isdigit() else 0
-                
+                    val = list_price_tag.find("span", {"class": "a-offscreen"})
+                    if val:
+                        list_price = float(val.get_text(strip=True).replace("₺", "").replace(".", "").replace(",", "").strip())
+
                 merchant_info = soup.find("div", {"id": "merchant-info"})
-                seller_text = merchant_info.get_text(strip=True) if merchant_info else ""
-                is_amazon_seller = "Amazon.com.tr" in seller_text
+                is_amazon_seller = "Amazon.com.tr" in merchant_info.get_text() if merchant_info else False
                 
-                category = "genel"
-                breadcrumb = soup.find("div", {"id": "wayfinding-breadcrumbs_container"})
-                if breadcrumb:
-                    b_text = breadcrumb.get_text(strip=True).lower()
-                    if any(x in b_text for x in ["elektronik", "bilgisayar", "teknoloji", "telefon"]):
-                        category = "elektronik"
-                    elif any(x in b_text for x in ["ev", "yaşam", "mutfak", "mobilya"]):
-                        category = "ev_yasam"
+                discount_rate = ((list_price - current_price) / list_price * 100) if list_price > current_price else 0
+                img_url = soup.find("img", {"id": "landingImage"}).get("src") if soup.find("img", {"id": "landingImage"}) else None
                 
-                discount_rate = 0
-                if list_price > current_price and list_price > 0:
-                    discount_rate = ((list_price - current_price) / list_price) * 100
-                
-                img_tag = soup.find("img", {"id": "landingImage"})
-                img_url = img_tag.get("src") if img_tag else None
-                
-                # Fiyat geçmişini güncelle ve 30 günlük dip kontrolü yap
                 is_30_day_low, last_lowest = self.update_price_history(asin, title, current_price)
                 
                 return {
-                    "asin": asin,
-                    "title": title, 
-                    "price": current_price, 
-                    "list_price": list_price,
-                    "discount_rate": discount_rate,
-                    "is_amazon_seller": is_amazon_seller,
-                    "category": category,
-                    "img_url": img_url, 
-                    "link": clean_url,
-                    "is_lowest": is_30_day_low,
-                    "last_lowest": last_lowest
+                    "asin": asin, "title": title, "price": current_price, "list_price": list_price,
+                    "discount_rate": discount_rate, "is_amazon_seller": is_amazon_seller,
+                    "category": "genel", "img_url": img_url, "link": clean_url,
+                    "is_lowest": is_30_day_low, "last_lowest": last_lowest
                 }
             except Exception as e:
-                logger.error(f"❌ SCRAPE HATASI: {e}")
+                logger.error(f"❌ Amazon Scrape Hatası: {e}")
+                return None
+
+    async def scrape_trendyol(self, url):
+        # Affiliate Parametreleri Ekle
+        clean_url = url.split("?")[0]
+        affiliate_url = f"{clean_url}?utm_source=aff_t&utm_medium=cps&utm_campaign={TRENDYOL_PARTNER_ID}"
+        
+        async with httpx.AsyncClient(headers=self.get_headers(), follow_redirects=True, timeout=25) as client:
+            try:
+                r = await client.get(clean_url)
+                soup = BeautifulSoup(r.text, "html.parser")
+                
+                title = soup.find("h1", {"class": "pr-new-br"}).get_text(strip=True) if soup.find("h1", {"class": "pr-new-br"}) else "Trendyol Ürünü"
+                
+                price_tag = soup.find("span", {"class": "prc-dsc"})
+                price_str = price_tag.get_text(strip=True).replace("TL", "").replace(".", "").replace(",", "").strip() if price_tag else "0"
+                current_price = float(price_str) if price_str.isdigit() else 0
+                
+                list_price_tag = soup.find("span", {"class": "prc-org"})
+                list_price = float(list_price_tag.get_text(strip=True).replace("TL", "").replace(".", "").replace(",", "").strip()) if list_price_tag else current_price
+                
+                discount_rate = ((list_price - current_price) / list_price * 100) if list_price > current_price else 0
+                img_url = soup.find("img", {"class": "base-product-image"}).get("src") if soup.find("img", {"class": "base-product-image"}) else None
+                
+                # ASIN yerine Trendyol ID kullan (URL'den çek)
+                product_id = re.search(r"-p-(\d+)", clean_url).group(1) if re.search(r"-p-(\d+)", clean_url) else "ty_" + str(hash(clean_url))
+                is_30_day_low, last_lowest = self.update_price_history(product_id, title, current_price)
+
+                return {
+                    "asin": product_id, "title": title, "price": current_price, "list_price": list_price,
+                    "discount_rate": discount_rate, "is_amazon_seller": True, # Trendyol için hep geçsin
+                    "category": "genel", "img_url": img_url, "link": affiliate_url,
+                    "is_lowest": is_30_day_low, "last_lowest": last_lowest
+                }
+            except Exception as e:
+                logger.error(f"❌ Trendyol Scrape Hatası: {e}")
+                return None
+
+    async def scrape_hepsiburada(self, url):
+        # Affiliate Parametreleri Ekle
+        clean_url = url.split("?")[0]
+        affiliate_url = f"{clean_url}?utm_source=affiliate&utm_medium=go-partner&utm_campaign={HEPSIBURADA_PARTNER_ID}"
+
+        async with httpx.AsyncClient(headers=self.get_headers(), follow_redirects=True, timeout=25) as client:
+            try:
+                r = await client.get(clean_url)
+                soup = BeautifulSoup(r.text, "html.parser")
+                
+                title = soup.find("h1", {"id": "product-name"}).get_text(strip=True) if soup.find("h1", {"id": "product-name"}) else "Hepsiburada Ürünü"
+                
+                price_tag = soup.find("span", {"data-test-id": "price-current-price"})
+                price_str = price_tag.get_text(strip=True).replace("TL", "").replace(".", "").replace(",", "").strip() if price_tag else "0"
+                current_price = float(price_str) if price_str.isdigit() else 0
+                
+                list_price_tag = soup.find("del", {"id": "old-price"})
+                list_price = float(list_price_tag.get_text(strip=True).replace("TL", "").replace(".", "").replace(",", "").strip()) if list_price_tag else current_price
+
+                discount_rate = ((list_price - current_price) / list_price * 100) if list_price > current_price else 0
+                img_tag = soup.find("img", {"id": "product-image"})
+                img_url = img_tag.get("src") if img_tag else None
+
+                product_id = re.search(r"-p-([A-Z0-9]+)", clean_url).group(1) if re.search(r"-p-([A-Z0-9]+)", clean_url) else "hb_" + str(hash(clean_url))
+                is_30_day_low, last_lowest = self.update_price_history(product_id, title, current_price)
+
+                return {
+                    "asin": product_id, "title": title, "price": current_price, "list_price": list_price,
+                    "discount_rate": discount_rate, "is_amazon_seller": True, 
+                    "category": "genel", "img_url": img_url, "link": affiliate_url,
+                    "is_lowest": is_30_day_low, "last_lowest": last_lowest
+                }
+            except Exception as e:
+                logger.error(f"❌ Hepsiburada Scrape Hatası: {e}")
                 return None
 
     async def post_to_all_channels(self, bot, data):
@@ -252,7 +324,7 @@ class AmazonBot:
             logger.error(f"❌ {target_channel} kanalına gönderilemedi: {e}")
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /ara command with rate limiting."""
+    """Handles the /ara command with platform selection and rate limiting."""
     if not update.message or not update.effective_user:
         return
 
@@ -263,7 +335,6 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in USER_SEARCH_LIMITS:
         USER_SEARCH_LIMITS[user_id] = []
     
-    # 60 saniyeden eski kayıtları temizle
     USER_SEARCH_LIMITS[user_id] = [t for t in USER_SEARCH_LIMITS[user_id] if now - t < 60]
 
     if len(USER_SEARCH_LIMITS[user_id]) >= 3:
@@ -273,26 +344,50 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "🔍 **Arama Asistanı Devrede!**\n\n"
-            "Aradığın ürünü bulmak için komutu şu şekilde kullan:\n"
-            "`/ara oyuncu klavyesi`",
+            "Kullanım: `/ara [platform] [ürün adı]`\n"
+            "Platformlar: `trendyol`, `hb`, `amazon` (varsayılan)\n\n"
+            "Örnekler:\n"
+            "`/ara trendyol oyuncu faresi`\n"
+            "`/ara hb kamp çadırı`\n"
+            "`/ara airfryer` (Amazon'da arar)",
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    # Sınırı geçmediyse zamanı kaydet ve devam et
-    USER_SEARCH_LIMITS[user_id].append(now)
+    # Platform Seçimi
+    first_arg = context.args[0].lower()
+    if first_arg in ["trendyol", "hb", "amazon", "hepsiburada"]:
+        platform = "hb" if first_arg == "hepsiburada" else first_arg
+        query_parts = context.args[1:]
+    else:
+        platform = "amazon"
+        query_parts = context.args
 
-    query = " ".join(context.args)
+    query = " ".join(query_parts)
+    if not query:
+        await update.message.reply_text("❌ Lütfen aramak istediğiniz ürünün adını yazın.")
+        return
+
+    USER_SEARCH_LIMITS[user_id].append(now)
     cleaned_query = urllib.parse.quote_plus(query)
-    search_url = f"https://www.amazon.com.tr/s?k={cleaned_query}&tag={STORE_ID}"
+
+    if platform == "trendyol":
+        search_url = TRENDYOL_SEARCH_URL.format(query=cleaned_query, partner_id=TRENDYOL_PARTNER_ID)
+        platform_name = "Trendyol"
+    elif platform == "hb":
+        search_url = HB_SEARCH_URL.format(query=cleaned_query, partner_id=HEPSIBURADA_PARTNER_ID)
+        platform_name = "Hepsiburada"
+    else:
+        search_url = AMAZON_SEARCH_URL.format(query=cleaned_query, tag=STORE_ID)
+        platform_name = "Amazon"
     
     response_text = (
-        f"💎 **Amazon Arama Asistanı**\n\n"
+        f"💎 **{platform_name} Arama Asistanı**\n\n"
         f"✨ **Aranan Ürün:** `{query}`\n"
         f"🚀 Senin için en uygun sonuçları hazırladım!"
     )
     
-    keyboard = [[InlineKeyboardButton("🛍️ Ürünleri Gör ve İncele", url=search_url)]]
+    keyboard = [[InlineKeyboardButton(f"🛍️ {platform_name} Ürünlerini Gör", url=search_url)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
