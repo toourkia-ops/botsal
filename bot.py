@@ -13,11 +13,21 @@ from telegram.constants import ParseMode
 # ================= CONFIG (BURALARI DOLDUR KANKA) =================
 TOKEN = "8769910441:AAHb0Y_jFaHBPWYKK-PT_QCh47RPLCyA3jw"
 KANAL_MAP = {
-    "elektronik": "@Elektronik_Kanal_ID",
+    "teknoloji": "@Elektronik_Kanal_ID",
+    "kozmetik": "@Kozmetik_Kanal_ID",
+    "tekstil": "@Moda_Kanal_ID",
     "ev_yasam": "@Ev_Yasam_Kanal_ID",
+    "seyahat": "@Seyahat_Kanal_ID",
     "genel": "@Amazon_indirim_tr"
 }
-SEYAHAT_KEYWORDS = ["valiz", "powerbank", "termos", "boyun yastığı", "adaptör", "sırt çantası", "şarj", "kulaklık", "pasaport"]
+
+CATEGORY_KEYWORDS = {
+    "teknoloji": ["bilgisayar", "laptop", "klavye", "mouse", "monitör", "ekran kartı", "işlemci", "telefon", "kulaklık", "tablet", "akıllı saat"],
+    "kozmetik": ["parfüm", "makyaj", "ruj", "fondöten", "nemlendirici", "şampuan", "tıraş makinesi", "güneş kremi", "epilatör", "serum"],
+    "tekstil": ["tişört", "ayakkabı", "sneaker", "mont", "kaban", "çanta", "kol saati", "ceket", "pantolon", "güneş gözlüğü"],
+    "ev_yasam": ["kahve makinesi", "robot süpürge", "airfryer", "tencere", "blender", "mobilya", "matkap", "aydınlatma", "ütü"],
+    "seyahat": ["valiz", "çadır", "uyku tulumu", "powerbank", "termos", "seyahat adaptörü", "boyun yastığı", "kamp", "sırt çantası"]
+}
 TOURKIA_DB = "tourkia_deals.json"
 DB_NAME = "bot_data.db"
 
@@ -61,6 +71,14 @@ class AmazonBot:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Referer": "https://www.google.com/"
         }
+
+    def detect_category(self, title):
+        """Ürün başlığına göre kategori tespiti yapar."""
+        title_lower = title.lower()
+        for category, keywords in CATEGORY_KEYWORDS.items():
+            if any(k in title_lower for k in keywords):
+                return category
+        return "genel"
 
     def init_db(self):
         """Veritabanı tablolarını oluşturur."""
@@ -192,12 +210,13 @@ class AmazonBot:
                 discount_rate = ((list_price - current_price) / list_price * 100) if list_price > current_price else 0
                 img_url = soup.find("img", {"id": "landingImage"}).get("src") if soup.find("img", {"id": "landingImage"}) else None
                 
+                category = self.detect_category(title)
                 is_30_day_low, last_lowest = self.update_price_history(asin, title, current_price)
                 
                 return {
                     "asin": asin, "title": title, "price": current_price, "list_price": list_price,
                     "discount_rate": discount_rate, "is_amazon_seller": is_amazon_seller,
-                    "category": "genel", "img_url": img_url, "link": clean_url,
+                    "category": category, "img_url": img_url, "link": clean_url,
                     "is_lowest": is_30_day_low, "last_lowest": last_lowest
                 }
             except Exception as e:
@@ -226,6 +245,9 @@ class AmazonBot:
                 discount_rate = ((list_price - current_price) / list_price * 100) if list_price > current_price else 0
                 img_url = soup.find("img", {"class": "base-product-image"}).get("src") if soup.find("img", {"class": "base-product-image"}) else None
                 
+                # Kategori tespiti
+                category = self.detect_category(title)
+                
                 # ASIN yerine Trendyol ID kullan (URL'den çek)
                 product_id = re.search(r"-p-(\d+)", clean_url).group(1) if re.search(r"-p-(\d+)", clean_url) else "ty_" + str(hash(clean_url))
                 is_30_day_low, last_lowest = self.update_price_history(product_id, title, current_price)
@@ -233,7 +255,7 @@ class AmazonBot:
                 return {
                     "asin": product_id, "title": title, "price": current_price, "list_price": list_price,
                     "discount_rate": discount_rate, "is_amazon_seller": True, # Trendyol için hep geçsin
-                    "category": "genel", "img_url": img_url, "link": affiliate_url,
+                    "category": category, "img_url": img_url, "link": affiliate_url,
                     "is_lowest": is_30_day_low, "last_lowest": last_lowest
                 }
             except Exception as e:
@@ -263,13 +285,14 @@ class AmazonBot:
                 img_tag = soup.find("img", {"id": "product-image"})
                 img_url = img_tag.get("src") if img_tag else None
 
+                category = self.detect_category(title)
                 product_id = re.search(r"-p-([A-Z0-9]+)", clean_url).group(1) if re.search(r"-p-([A-Z0-9]+)", clean_url) else "hb_" + str(hash(clean_url))
                 is_30_day_low, last_lowest = self.update_price_history(product_id, title, current_price)
 
                 return {
                     "asin": product_id, "title": title, "price": current_price, "list_price": list_price,
                     "discount_rate": discount_rate, "is_amazon_seller": True, 
-                    "category": "genel", "img_url": img_url, "link": affiliate_url,
+                    "category": category, "img_url": img_url, "link": affiliate_url,
                     "is_lowest": is_30_day_low, "last_lowest": last_lowest
                 }
             except Exception as e:
@@ -314,7 +337,7 @@ class AmazonBot:
             )
             logger.info(f"✅ Ürün {target_channel} kanalında paylaşıldı. (Kategori: {data['category']})")
             
-            if any(k in data['title'].lower() for k in SEYAHAT_KEYWORDS):
+            if data['category'] == "seyahat":
                 self.save_to_tourkia(data)
             
             # AŞAMA 2: Alarm Kontrolü
