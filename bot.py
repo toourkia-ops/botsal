@@ -246,6 +246,9 @@ class AmazonBot:
                         pass
                 # --------------------------------------
 
+                # DEBUG LOG: İndirim oranını ve diğer bilgileri terminale yazdır
+                print(f"DEBUG [Amazon]: {title[:40]}... | İndirim: %{discount_rate:.1f} | Stok: {stock_alert} | Yeni: {is_new_arrival}")
+
                 return {
                     "asin": asin, "title": title, "price": current_price, "list_price": list_price,
                     "discount_rate": discount_rate, "is_amazon_seller": is_amazon_seller,
@@ -287,6 +290,9 @@ class AmazonBot:
                 product_id = re.search(r"-p-(\d+)", clean_url).group(1) if re.search(r"-p-(\d+)", clean_url) else "ty_" + str(hash(clean_url))
                 is_30_day_low, last_lowest = self.update_price_history(product_id, title, current_price)
 
+                # DEBUG LOG
+                print(f"DEBUG [Trendyol]: {title[:40]}... | İndirim: %{discount_rate:.1f}")
+
                 return {
                     "asin": product_id, "title": title, "price": current_price, "list_price": list_price,
                     "discount_rate": discount_rate, "is_amazon_seller": True, # Trendyol için hep geçsin
@@ -323,6 +329,9 @@ class AmazonBot:
                 category = self.detect_category(title)
                 product_id = re.search(r"-p-([A-Z0-9]+)", clean_url).group(1) if re.search(r"-p-([A-Z0-9]+)", clean_url) else "hb_" + str(hash(clean_url))
                 is_30_day_low, last_lowest = self.update_price_history(product_id, title, current_price)
+
+                # DEBUG LOG
+                print(f"DEBUG [Hepsiburada]: {title[:40]}... | İndirim: %{discount_rate:.1f}")
 
                 return {
                     "asin": product_id, "title": title, "price": current_price, "list_price": list_price,
@@ -567,8 +576,9 @@ async def auto_loop(bot_engine, application):
                         if clean_url not in bot_engine.shared_urls:
                             data = await bot_engine.scrape_product(clean_url)
                             if data and data['img_url']:
-                                # İndirim %5+ ise VEYA Stok Alarmı VEYA Yeni Ürün ise paylaş
-                                if data['discount_rate'] >= 5 or data.get('stock_alert') or data.get('is_new_arrival'):
+                                # --- DEBUG MODU: FİLTRE GEVŞETME ---
+                                # %0 indirim bile olsa VEYA Stok Alarmı VEYA Yeni Ürün ise paylaş (OR mantığı)
+                                if data['discount_rate'] >= 0 or data.get('stock_alert') or data.get('is_new_arrival'):
                                     await bot_engine.post_to_all_channels(application.bot, data)
                                     bot_engine.shared_urls.add(clean_url)
                                     count += 1
@@ -598,7 +608,8 @@ async def main():
             await update.message.reply_text("⏳ Tüm kanallar için işlem başlatıldı...")
             data = await bot_engine.scrape_product(url_match.group(1))
             if data:
-                if data['discount_rate'] < 5 and not data.get('stock_alert') and not data.get('is_new_arrival'):
+                # --- DEBUG MODU: FİLTRE GEVŞETME ---
+                if data['discount_rate'] < 0 and not data.get('stock_alert') and not data.get('is_new_arrival'):
                     await update.message.reply_text(f"⚠️ Bu ürünün indirim oranı %{int(data['discount_rate'])} ve özel bir durumu (stok/yeni) yok. Paylaşılmadı.")
                     return
 
